@@ -1,0 +1,28 @@
+name: HigherGov to GHL Sync
+
+on:
+  schedule:
+    - cron: '0 8 * * *'   # 8:00 AM UTC daily
+    - cron: '0 20 * * *'  # 8:00 PM UTC daily
+  workflow_dispatch:       # allows manual run from GitHub UI
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run sync
+        env:
+          HIGHERGOV_API_KEY: ${{ secrets.HIGHERGOV_API_KEY }}
+          GHL_API_KEY: ${{ secrets.GHL_API_KEY }}
+        run: python sync.py
