@@ -1,10 +1,14 @@
 import os
+import re
 import requests
 from collections import defaultdict
 
 HGOV_KEY = os.environ["HIGHERGOV_API_KEY"]
 GHL_TOKEN = os.environ["GHL_API_KEY"]
 LOCATION_ID = "nN5rGX4FAVMJFzv4Qvdy"
+
+# GHL custom field ID for Solicitation ID
+SOLICITATION_FIELD_ID = "ttYlo5NmQ5HZhyLckDRO"
 
 # GHL pipeline config — one entry per HigherGov pipeline name
 PIPELINE_CONFIG = {
@@ -30,6 +34,26 @@ PIPELINE_CONFIG = {
     }
 }
 
+def extract_solicitation_id(opp_path):
+    """Extract solicitation number from HigherGov opportunity URL.
+    e.g. https://www.highergov.com/contract-opportunity/N6426726Q4103-Sources_Sought-55abe/
+    returns 'N6426726Q4103'
+    """
+    if not opp_path:
+        return ""
+    match = re.search(r'/contract-opportunity/([^/]+)/', opp_path)
+    if match:
+        slug = match.group(1)
+        # The solicitation ID is everything before the first hyphen+type segment
+        # Pattern: SOLICIT_ID-Type_Description-hash
+        parts = slug.split('-')
+        # Find where the type description starts (capitalized word like Sources, Solicitation, etc.)
+        for i, part in enumerate(parts):
+            if i > 0 and part[0].isupper():
+                return '-'.join(parts[:i])
+        return parts[0]
+    return ""
+
 def map_stage(s):
     s = (s or "").lower()
     if any(x in s for x in ["closed", "no bid", "lost", "award"]): return "Closed"
@@ -51,10 +75,20 @@ def get_pursuits():
     return filtered
 
 def get_existing_opps(pipeline_id):
+    """Return dict keyed by solicitation_id custom field value (falls back to name)."""
     r = requests.get("https://services.leadconnectorhq.com/opportunities/search",
         headers={"Authorization": f"Bearer {GHL_TOKEN}", "Version": "2021-07-28"},
         params={"location_id": LOCATION_ID, "pipeline_id": pipeline_id, "limit": 100})
-    return {o["name"]: o for o in r.json().get("opportunities", [])}
+    opps = r.json().get("opportunities", [])
+    by_sol_id = {}
+    by_name = {}
+    for o in opps:
+        # Index by solicitation ID if present
+        for cf in (o.get("customFields") or []):
+            if cf.get("id") == SOLICITATION_FIELD_ID and cf.get("fieldValue"):
+                by_sol_id[cf["fieldValue"]] = o
+        by_name[o["name"]] = o
+    return by_sol_id, by_name
 
 def create_contact(name):
     r = requests.post("https://services.leadconnectorhq.com/contacts/",
@@ -75,32 +109,58 @@ def sync():
         config = PIPELINE_CONFIG[hgov_name]
         pipeline_id = config["pipeline_id"]
         stage_ids = config["stages"]
-        existing = get_existing_opps(pipeline_id)
+        by_sol_id, by_name = get_existing_opps(pipeline_id)
         print(f"\nSyncing '{hgov_name}' -> GHL pipeline {pipeline_id}")
-        print(f"  {len(pipeline_pursuits)} pursuits from HGov, {len(existing)} already in GHL")
+        print(f"  {len(pipeline_pursuits)} pursuits from HGov, {len(by_name)} already in GHL")
 
         for p in pipeline_pursuits:
-            name = p.get("pursuit_name") or "Unnamed"
+            pursuit_name = p.get("pursuit_name") or "Unnamed"
+            sol_id = extract_solicitation_id(p.get("highergov_opp_path", ""))
+            # Opportunity name includes solicitation ID as prefix for pipeline card visibility
+            opp_name = f"[{sol_id}] {pursuit_name}" if sol_id else pursuit_name
+
             stage = map_stage(p.get("stage_name", ""))
             stage_id = stage_ids[stage]
             status = "won" if stage == "Closed" else "open"
             value = float(p.get("est_value") or p.get("weighted_value") or 0)
-            payload = {"name": name, "pipelineId": pipeline_id, "locationId": LOCATION_ID,
-                       "pipelineStageId": stage_id, "status": status, "monetaryValue": value}
 
-            if name in existing:
-                r = requests.put(f"https://services.leadconnectorhq.com/opportunities/{existing[name]['id']}",
+            custom_fields = [{"id": SOLICITATION_FIELD_ID, "field_value": sol_id}] if sol_id else []
+
+            payload = {
+                "name": opp_name,
+                "pipelineId": pipeline_id,
+                "pipelineStageId": stage_id,
+                "status": status,
+                "monetaryValue": value,
+                "customFields": custom_fields,
+            }
+
+            # Match by solicitation ID first (most reliable), then by name
+            existing = by_sol_id.get(sol_id) or by_name.get(opp_name) or by_name.get(pursuit_name)
+
+            if existing:
+                r = requests.put(f"https://services.leadconnectorhq.com/opportunities/{existing['id']}",
                     headers=headers, json=payload)
-                if r.json().get("opportunity"): updated += 1
-                else: errors += 1; print(f"  UPDATE ERR {name}: {r.text[:100]}")
+                resp = r.json()
+                if resp.get("opportunity"):
+                    updated += 1
+                    print(f"  UPDATED: [{sol_id}] {pursuit_name}")
+                else:
+                    errors += 1
+                    print(f"  UPDATE ERR [{sol_id}] {pursuit_name}: {r.text[:120]}")
             else:
-                cid = create_contact(name)
+                cid = create_contact(opp_name)
                 if not cid: errors += 1; continue
                 payload["contactId"] = cid
                 r = requests.post("https://services.leadconnectorhq.com/opportunities/",
                     headers=headers, json=payload)
-                if r.json().get("id"): created += 1
-                else: errors += 1; print(f"  CREATE ERR {name}: {r.text[:100]}")
+                resp = r.json()
+                if resp.get("id"):
+                    created += 1
+                    print(f"  CREATED: [{sol_id}] {pursuit_name}")
+                else:
+                    errors += 1
+                    print(f"  CREATE ERR [{sol_id}] {pursuit_name}: {r.text[:120]}")
 
     print(f"\nSync complete: {created} created, {updated} updated, {errors} errors (of {len(pursuits)} total)")
 
