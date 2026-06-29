@@ -1,10 +1,13 @@
 import os
 import requests
 
-HGOV_KEY    = os.environ["HIGHERGOV_API_KEY"]
-GHL_TOKEN   = os.environ["GHL_API_KEY"]
+HGOV_KEY = os.environ["HIGHERGOV_API_KEY"]
+GHL_TOKEN = os.environ["GHL_API_KEY"]
 LOCATION_ID = "nN5rGX4FAVMJFzv4Qvdy"
 PIPELINE_ID = "0GHLxoIY3MkwhWg4p10Y"
+
+# Only sync these two HigherGov pipelines
+ALLOWED_PIPELINES = {"ATW Procurement", "Infinity Grid Proposals"}
 
 STAGE_IDS = {
     "New Lead":      "f111064d-0b33-4b7a-a8a2-4b43adcc9374",
@@ -31,7 +34,10 @@ def get_pursuits():
         items += data.get("results", [])
         if not data.get("next"): break
         page += 1
-    return items
+    # Filter to only the two allowed pipelines
+    filtered = [p for p in items if p.get("pipeline_name") in ALLOWED_PIPELINES]
+    print(f"Fetched {len(items)} total pursuits, {len(filtered)} from allowed pipelines: {ALLOWED_PIPELINES}")
+    return filtered
 
 def get_existing_opps():
     r = requests.get("https://services.leadconnectorhq.com/opportunities/search",
@@ -48,17 +54,17 @@ def create_contact(name):
 def sync():
     pursuits = get_pursuits()
     existing = get_existing_opps()
-    headers  = {"Authorization": f"Bearer {GHL_TOKEN}", "Version": "2021-07-28", "Content-Type": "application/json"}
+    headers = {"Authorization": f"Bearer {GHL_TOKEN}", "Version": "2021-07-28", "Content-Type": "application/json"}
     created = updated = errors = 0
 
     for p in pursuits:
-        name     = p.get("pursuit_name") or "Unnamed"
-        stage    = map_stage(p.get("stage_name", ""))
+        name = p.get("pursuit_name") or "Unnamed"
+        stage = map_stage(p.get("stage_name", ""))
         stage_id = STAGE_IDS[stage]
-        status   = "won" if stage == "Closed" else "open"
-        value    = float(p.get("est_value") or p.get("weighted_value") or 0)
-        payload  = {"name": name, "pipelineId": PIPELINE_ID, "locationId": LOCATION_ID,
-                    "pipelineStageId": stage_id, "status": status, "monetaryValue": value}
+        status = "won" if stage == "Closed" else "open"
+        value = float(p.get("est_value") or p.get("weighted_value") or 0)
+        payload = {"name": name, "pipelineId": PIPELINE_ID, "locationId": LOCATION_ID,
+                   "pipelineStageId": stage_id, "status": status, "monetaryValue": value}
 
         if name in existing:
             r = requests.put(f"https://services.leadconnectorhq.com/opportunities/{existing[name]['id']}",
