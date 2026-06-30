@@ -11,53 +11,42 @@ LOCATION_ID = "nN5rGX4FAVMJFzv4Qvdy"
 SOLICITATION_FIELD_ID = "ttYlo5NmQ5HZhyLckDRO"
 DUE_DATE_FIELD_ID = "bpholONMpvxCF2arQ8jJ"
 
-# GHL pipeline config — only the entry stage ID is needed per pipeline.
-# New opportunities always land in "Added to Pipeline".
-# Existing opportunities are NEVER touched — users own stage movement in GHL.
+# GHL pipeline config
 PIPELINE_CONFIG = {
     "ATW Procurement": {
         "pipeline_id": "aWsAmf8I2r47X26Dcky5",
-        "entry_stage_id": "4ed20b7e-9215-4dc2-b05f-42feec022d53",  # Added to Pipeline
+        "entry_stage_id": "4ed20b7e-9215-4dc2-b05f-42feec022d53",
     },
     "Infinity Grid Proposals": {
         "pipeline_id": "HXJQmVq4wpBffZVtATtP",
-        "entry_stage_id": "1b0507e9-1476-42d9-b9dc-a95411cf194e",  # Pre-Pipeline
+        "entry_stage_id": "1b0507e9-1476-42d9-b9dc-a95411cf194e",
     },
 }
 
 def get_sol_id(pursuit):
-    """Return the best available solicitation identifier for a HigherGov pursuit.
+    """Return the best solicitation identifier for a HigherGov pursuit.
 
-    Priority order:
-    1. pursuit['reference_id']  — direct field, most reliable
-    2. Parse the URL slug from pursuit['highergov_opp_path']
-       e.g. /contract-opportunity/N6426726Q4103-Sources_Sought-55abe/
+    Priority:
+    1. pursuit['reference_id'] - direct field, most reliable
+    2. Parse URL slug from pursuit['highergov_opp_path']
     3. Empty string if neither yields a value
     """
-    # 1. Direct reference_id field
     ref = (pursuit.get("reference_id") or "").strip()
     if ref:
         return ref
-
-    # 2. Parse from the HigherGov opportunity URL slug
     opp_path = pursuit.get("highergov_opp_path") or ""
     match = re.search(r'/contract-opportunity/([^/]+)/', opp_path)
     if match:
         slug = match.group(1)
         parts = slug.split('-')
-        # The sol number is before the first Title-Case word (e.g. 'Sources', 'Presolicitation')
         for i, part in enumerate(parts):
             if i > 0 and part and part[0].isupper():
                 return '-'.join(parts[:i])
         return parts[0]
-
     return ""
 
 def get_due_date(pursuit):
-    """Return the best available due date from a HigherGov pursuit record.
-    Priority: proposal_due_date > source_soughts_due_date > solicitation_date
-    Returns a string like '2025-09-15' or '' if none available.
-    """
+    """Return the best available due date. Priority: proposal_due_date > source_soughts_due_date > solicitation_date"""
     for field in ("proposal_due_date", "source_soughts_due_date", "solicitation_date"):
         val = pursuit.get(field)
         if val:
@@ -65,7 +54,6 @@ def get_due_date(pursuit):
     return ""
 
 def get_pursuits():
-    """Fetch all pursuits from HigherGov that belong to a tracked pipeline."""
     items, page = [], 1
     while True:
         r = requests.get(
@@ -82,9 +70,6 @@ def get_pursuits():
     return filtered
 
 def get_existing_opps(pipeline_id):
-    """Return sets of solicitation IDs and opportunity names already in this GHL pipeline.
-    Used only to detect duplicates — we never update existing opps.
-    """
     sol_ids, names = set(), set()
     r = requests.get(
         "https://services.leadconnectorhq.com/opportunities/search",
@@ -99,7 +84,6 @@ def get_existing_opps(pipeline_id):
     return sol_ids, names
 
 def search_contact_by_name(first_name):
-    """Search GHL contacts by firstName to find an existing placeholder contact."""
     r = requests.get(
         "https://services.leadconnectorhq.com/contacts/",
         headers={"Authorization": f"Bearer {GHL_TOKEN}", "Version": "2021-07-28"},
@@ -111,7 +95,6 @@ def search_contact_by_name(first_name):
     return None
 
 def get_or_create_contact(name):
-    """Return an existing placeholder contact ID, or create a new one."""
     existing_id = search_contact_by_name(name)
     if existing_id:
         return existing_id
@@ -149,7 +132,6 @@ def sync():
         pipeline_id = config["pipeline_id"]
         entry_stage_id = config["entry_stage_id"]
 
-        # Fetch existing opps — only used to skip duplicates, never to update
         existing_sol_ids, existing_names = get_existing_opps(pipeline_id)
         print(
             f"\nPipeline '{hgov_pipeline_name}': {len(pipeline_pursuits)} in HGov, "
@@ -161,7 +143,6 @@ def sync():
             sol_id = get_sol_id(p)
             opp_name = f"[{sol_id}] {pursuit_name}" if sol_id else pursuit_name
 
-            # SKIP if already in GHL — users own stage/status, we never overwrite
             if sol_id and sol_id in existing_sol_ids:
                 skipped += 1
                 print(f"  SKIP (exists): [{sol_id}] {pursuit_name}")
@@ -171,11 +152,9 @@ def sync():
                 print(f"  SKIP (exists): {pursuit_name}")
                 continue
 
-            # NEW opportunity — create it in "Added to Pipeline", status open
             value = float(p.get("est_value") or p.get("weighted_value") or 0)
             due_date = get_due_date(p)
 
-            # Build custom fields list: always include Solicitation ID; add Due Date if available
             custom_fields = []
             if sol_id:
                 custom_fields.append({"id": SOLICITATION_FIELD_ID, "field_value": sol_id})
@@ -191,8 +170,8 @@ def sync():
             payload = {
                 "name": opp_name,
                 "pipelineId": pipeline_id,
-                "pipelineStageId": entry_stage_id,  # Always "Added to Pipeline"
-                "status": "open",                    # Always open on creation
+                "pipelineStageId": entry_stage_id,
+                "status": "open",
                 "monetaryValue": value,
                 "contactId": cid,
                 "customFields": custom_fields,
