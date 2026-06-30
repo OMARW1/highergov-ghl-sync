@@ -7,8 +7,9 @@ HGOV_KEY = os.environ["HIGHERGOV_API_KEY"]
 GHL_TOKEN = os.environ["GHL_API_KEY"]
 LOCATION_ID = "nN5rGX4FAVMJFzv4Qvdy"
 
-# GHL custom field ID for Solicitation ID
+# GHL custom field IDs for opportunities
 SOLICITATION_FIELD_ID = "ttYlo5NmQ5HZhyLckDRO"
+DUE_DATE_FIELD_ID = "bpholONMpvxCF2arQ8jJ"
 
 # GHL pipeline config — only the entry stage ID is needed per pipeline.
 # New opportunities always land in "Added to Pipeline".
@@ -40,6 +41,19 @@ def extract_solicitation_id(opp_path):
             if i > 0 and part[0].isupper():
                 return '-'.join(parts[:i])
         return parts[0]
+    return ""
+
+
+def get_due_date(pursuit):
+    """Return the best available due date from a HigherGov pursuit record.
+    Priority: proposal_due_date > source_soughts_due_date > solicitation_date
+    Returns a string like '2025-09-15' or '' if none available.
+    """
+    for field in ("proposal_due_date", "source_soughts_due_date", "solicitation_date"):
+        val = pursuit.get(field)
+        if val:
+            # HigherGov returns dates as ISO strings (YYYY-MM-DD or YYYY-MM-DDThh:mm:ssZ)
+            return str(val)[:10]
     return ""
 
 
@@ -156,7 +170,14 @@ def sync():
 
             # NEW opportunity — create it in "Added to Pipeline", status open
             value = float(p.get("est_value") or p.get("weighted_value") or 0)
-            custom_fields = [{"id": SOLICITATION_FIELD_ID, "field_value": sol_id}] if sol_id else []
+            due_date = get_due_date(p)
+
+            # Build custom fields list: always include Solicitation ID; add Due Date if available
+            custom_fields = []
+            if sol_id:
+                custom_fields.append({"id": SOLICITATION_FIELD_ID, "field_value": sol_id})
+            if due_date:
+                custom_fields.append({"id": DUE_DATE_FIELD_ID, "field_value": due_date})
 
             cid = get_or_create_contact(opp_name)
             if not cid:
@@ -182,7 +203,8 @@ def sync():
             resp = r.json()
             if resp.get("id"):
                 created += 1
-                print(f"  CREATED: [{sol_id}] {pursuit_name} -> Added to Pipeline")
+                due_str = f" (due {due_date})" if due_date else ""
+                print(f"  CREATED: [{sol_id}] {pursuit_name} -> Added to Pipeline{due_str}")
             else:
                 errors += 1
                 print(f"  CREATE ERR [{sol_id}] {pursuit_name}: {r.text[:120]}")
