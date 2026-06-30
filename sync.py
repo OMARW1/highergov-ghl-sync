@@ -25,24 +25,33 @@ PIPELINE_CONFIG = {
     },
 }
 
+def get_sol_id(pursuit):
+    """Return the best available solicitation identifier for a HigherGov pursuit.
 
-def extract_solicitation_id(opp_path):
-    """Extract solicitation number from HigherGov opportunity URL.
-    e.g. https://www.highergov.com/contract-opportunity/N6426726Q4103-Sources_Sought-55abe/
-    returns 'N6426726Q4103'
+    Priority order:
+    1. pursuit['reference_id']  — direct field, most reliable
+    2. Parse the URL slug from pursuit['highergov_opp_path']
+       e.g. /contract-opportunity/N6426726Q4103-Sources_Sought-55abe/
+    3. Empty string if neither yields a value
     """
-    if not opp_path:
-        return ""
+    # 1. Direct reference_id field
+    ref = (pursuit.get("reference_id") or "").strip()
+    if ref:
+        return ref
+
+    # 2. Parse from the HigherGov opportunity URL slug
+    opp_path = pursuit.get("highergov_opp_path") or ""
     match = re.search(r'/contract-opportunity/([^/]+)/', opp_path)
     if match:
         slug = match.group(1)
         parts = slug.split('-')
+        # The sol number is before the first Title-Case word (e.g. 'Sources', 'Presolicitation')
         for i, part in enumerate(parts):
-            if i > 0 and part[0].isupper():
+            if i > 0 and part and part[0].isupper():
                 return '-'.join(parts[:i])
         return parts[0]
-    return ""
 
+    return ""
 
 def get_due_date(pursuit):
     """Return the best available due date from a HigherGov pursuit record.
@@ -52,10 +61,8 @@ def get_due_date(pursuit):
     for field in ("proposal_due_date", "source_soughts_due_date", "solicitation_date"):
         val = pursuit.get(field)
         if val:
-            # HigherGov returns dates as ISO strings (YYYY-MM-DD or YYYY-MM-DDThh:mm:ssZ)
             return str(val)[:10]
     return ""
-
 
 def get_pursuits():
     """Fetch all pursuits from HigherGov that belong to a tracked pipeline."""
@@ -74,7 +81,6 @@ def get_pursuits():
     print(f"Fetched {len(items)} total pursuits, {len(filtered)} from tracked pipelines")
     return filtered
 
-
 def get_existing_opps(pipeline_id):
     """Return sets of solicitation IDs and opportunity names already in this GHL pipeline.
     Used only to detect duplicates — we never update existing opps.
@@ -92,7 +98,6 @@ def get_existing_opps(pipeline_id):
                 sol_ids.add(cf["fieldValue"])
     return sol_ids, names
 
-
 def search_contact_by_name(first_name):
     """Search GHL contacts by firstName to find an existing placeholder contact."""
     r = requests.get(
@@ -104,7 +109,6 @@ def search_contact_by_name(first_name):
         if c.get("firstName", "")[:40] == first_name[:40] and c.get("lastName") == "[HGov]":
             return c.get("id")
     return None
-
 
 def get_or_create_contact(name):
     """Return an existing placeholder contact ID, or create a new one."""
@@ -126,7 +130,6 @@ def get_or_create_contact(name):
         },
     )
     return r.json().get("contact", {}).get("id")
-
 
 def sync():
     pursuits = get_pursuits()
@@ -155,7 +158,7 @@ def sync():
 
         for p in pipeline_pursuits:
             pursuit_name = p.get("pursuit_name") or "Unnamed"
-            sol_id = extract_solicitation_id(p.get("highergov_opp_path", ""))
+            sol_id = get_sol_id(p)
             opp_name = f"[{sol_id}] {pursuit_name}" if sol_id else pursuit_name
 
             # SKIP if already in GHL — users own stage/status, we never overwrite
@@ -213,7 +216,6 @@ def sync():
         f"\nSync complete: {created} created, {skipped} skipped (already in GHL), "
         f"{errors} errors (of {len(pursuits)} total)"
     )
-
 
 if __name__ == "__main__":
     sync()
