@@ -24,29 +24,38 @@ PIPELINE_CONFIG = {
 }
 
 def get_sol_id(pursuit):
-    """Return the best solicitation identifier for a HigherGov pursuit.
+    """Extract the solicitation number from a HigherGov pursuit.
 
     Priority:
-    1. pursuit['reference_id'] - direct field, most reliable
-    2. Parse URL slug from pursuit['highergov_opp_path']
-    3. Empty string if neither yields a value
+    1. Parse URL slug from highergov_opp_path
+       e.g. /contract-opportunity/N6426726Q4103-Sources_Sought-55abe/
+       -> N6426726Q4103
+    2. version_number field (may contain sol number as string)
+    3. Empty string
     """
-    ref = (pursuit.get("reference_id") or "").strip()
-    if ref:
-        return ref
+    # 1. Parse from URL slug — this is the most reliable source
     opp_path = pursuit.get("highergov_opp_path") or ""
     match = re.search(r'/contract-opportunity/([^/]+)/', opp_path)
     if match:
         slug = match.group(1)
         parts = slug.split('-')
+        # Sol number is before the first TitleCase word (Sources, Presolicitation, etc.)
         for i, part in enumerate(parts):
             if i > 0 and part and part[0].isupper():
                 return '-'.join(parts[:i])
         return parts[0]
+
+    # 2. version_number field (always cast to string)
+    ver = pursuit.get("version_number")
+    if ver is not None:
+        ver_str = str(ver).strip()
+        if ver_str and ver_str != "0":
+            return ver_str
+
     return ""
 
 def get_due_date(pursuit):
-    """Return the best available due date. Priority: proposal_due_date > source_soughts_due_date > solicitation_date"""
+    """Return best available due date. Priority: proposal_due_date > source_soughts_due_date > solicitation_date"""
     for field in ("proposal_due_date", "source_soughts_due_date", "solicitation_date"):
         val = pursuit.get(field)
         if val:
@@ -114,6 +123,69 @@ def get_or_create_contact(name):
     )
     return r.json().get("contact", {}).get("id")
 
+def backfill_sol_ids(pursuits, headers):
+    """One-time backfill: update existing GHL opps that are missing a Solicitation ID.
+    Matches by opportunity name, sets the sol ID custom field.
+    Safe: only writes the sol ID field, never changes stage/status.
+    """
+    print("\nBackfilling Solicitation IDs on existing opps...")
+    by_pipeline = defaultdict(list)
+    for p in pursuits:
+        by_pipeline[p.get("pipeline_name")].append(p)
+
+    backfilled = 0
+    for hgov_name, pipeline_pursuits in by_pipeline.items():
+        config = PIPELINE_CONFIG[hgov_name]
+        pipeline_id = config["pipeline_id"]
+
+        # Fetch all existing opps in this pipeline
+        page = 1
+        while True:
+            r = requests.get(
+                "https://services.leadconnectorhq.com/opportunities/search",
+                headers={"Authorization": f"Bearer {GHL_TOKEN}", "Version": "2021-07-28"},
+                params={"location_id": LOCATION_ID, "pipeline_id": pipeline_id, "limit": 100, "page": page},
+            )
+            data = r.json()
+            opps = data.get("opportunities", [])
+            if not opps:
+                break
+
+            for opp in opps:
+                # Skip if already has a sol ID
+                has_sol = any(
+                    cf.get("id") == SOLICITATION_FIELD_ID and cf.get("fieldValue")
+                    for cf in (opp.get("customFields") or [])
+                )
+                if has_sol:
+                    continue
+
+                opp_name = opp.get("name", "")
+                # Match pursuit by name (strip [SOL_ID] prefix if present)
+                name_bare = re.sub(r'^\[[^\]]+\]\s*', '', opp_name)
+                for p in pipeline_pursuits:
+                    sol_id = get_sol_id(p)
+                    pursuit_name = p.get("pursuit_name") or ""
+                    if not sol_id:
+                        continue
+                    if pursuit_name == name_bare or opp_name == f"[{sol_id}] {pursuit_name}" or pursuit_name in opp_name:
+                        # Update only the custom fields — never touch stage/status
+                        patch = requests.put(
+                            f"https://services.leadconnectorhq.com/opportunities/{opp['id']}",
+                            headers=headers,
+                            json={"customFields": [{"id": SOLICITATION_FIELD_ID, "field_value": sol_id}]},
+                        )
+                        if patch.status_code in (200, 201):
+                            backfilled += 1
+                            print(f"  BACKFILL: [{sol_id}] {pursuit_name}")
+                        break
+
+            if not data.get("meta", {}).get("nextPageUrl"):
+                break
+            page += 1
+
+    print(f"Backfill complete: {backfilled} opps updated with Solicitation ID")
+
 def sync():
     pursuits = get_pursuits()
     headers = {
@@ -122,6 +194,9 @@ def sync():
         "Content-Type": "application/json",
     }
     created = skipped = errors = 0
+
+    # Backfill sol IDs on existing opps that are missing them
+    backfill_sol_ids(pursuits, headers)
 
     by_pipeline = defaultdict(list)
     for p in pursuits:
@@ -145,11 +220,9 @@ def sync():
 
             if sol_id and sol_id in existing_sol_ids:
                 skipped += 1
-                print(f"  SKIP (exists): [{sol_id}] {pursuit_name}")
                 continue
             if opp_name in existing_names or pursuit_name in existing_names:
                 skipped += 1
-                print(f"  SKIP (exists): {pursuit_name}")
                 continue
 
             value = float(p.get("est_value") or p.get("weighted_value") or 0)
@@ -192,8 +265,7 @@ def sync():
                 print(f"  CREATE ERR [{sol_id}] {pursuit_name}: {r.text[:120]}")
 
     print(
-        f"\nSync complete: {created} created, {skipped} skipped (already in GHL), "
-        f"{errors} errors (of {len(pursuits)} total)"
+        f"\nSync complete: {created} created, {skipped} skipped, {errors} errors"
     )
 
 if __name__ == "__main__":
